@@ -273,8 +273,8 @@ class Voice(Base):
     # 가족이 업로드한 녹음 파일 주소. 보이스 클로닝 학습의 원본이며,
     # 기본 음성(학습본이 아닌 것)은 녹음 파일이 없으므로 nullable.
     audio_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    # 등록이 끝나면 CosyVoice 가 부여하는 화자 식별자(spk_<voiceId>).
-    # 합성 시 이 값으로 목소리를 지목한다. 등록 전/실패면 None.
+    # Fish Audio 목소리 모델 ID. 합성 시 /v1/tts 의 reference_id 로 목소리를 지목한다.
+    # 등록 요청 전/실패면 None. status=training 이면 모델은 있지만 아직 학습 중이다.
     speaker_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     # status=failed 일 때의 사유. 앱이 재녹음 안내에 쓴다.
     error_message: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)

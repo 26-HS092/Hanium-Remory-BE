@@ -1,7 +1,8 @@
-"""가족 목소리 등록(제로샷 화자 등록)·상태 조회·삭제.
+"""가족 목소리 등록(Fish Audio 보이스 클로닝)·상태 조회·삭제.
 
-흐름: 가족이 녹음 업로드 → EC2 가 CosyVoice /enroll 로 화자 등록(제로샷, 수 초)
-      → status=ready(+speaker_id) → PATCH /devices/{id}/settings/voice 로 기본 음성 지정.
+흐름: 가족이 녹음 업로드 → EC2 가 Fish Audio 에 비공개 목소리 모델 생성(fast, 보통 즉시)
+      → status=ready(+speaker_id=모델 ID) → PATCH /devices/{id}/settings/voice 로 기본 음성 지정.
+      생성 응답이 아직 trained 가 아니면 training 으로 두고, 상태 조회 때 Fish 에 다시 묻는다.
 음성은 기기(device)에 묶이고, 누가 녹음했는지는 protector_id 로 남는다.
 """
 
@@ -15,7 +16,7 @@ from ..database import get_db
 from ..deps import get_current_protector
 from ..errors import APIError, envelope
 from ..models import Protector, Voice
-from ..services import cosyvoice
+from ..services import fish_audio
 from ..services.access import (
     ensure_default_voice,
     get_owned_device,
@@ -28,8 +29,24 @@ from ..services.storage import storage
 router = APIRouter(tags=["voices"])
 
 VOICE_PREFIX = "voices"
-ALLOWED_EXT = {".wav", ".mp3", ".m4a", ".webm", ".ogg"}
+# Fish Audio 가 받는 형식만 허용한다(wav·mp3·m4a·opus).
+ALLOWED_EXT = {".wav", ".mp3", ".m4a", ".opus"}
 MAX_BYTES = 30 * 1024 * 1024  # 30MB
+
+
+def _apply_state(db: Session, voice: Voice, device, state: str) -> None:
+    """Fish Audio 모델 state 를 우리 목소리 상태로 옮긴다. 막 ready 가 되면 등록한 본인에게 알린다."""
+    if state == "trained":
+        if voice.status != "ready":
+            voice.status = "ready"
+            voice.progress = 100
+            db.commit()
+            if device.user_id is not None and voice.protector_id is not None:
+                notify_voice_ready(db, device.user_id, voice.protector_id, voice.name)
+    elif state == "failed":
+        voice.status = "failed"
+        voice.error_message = "목소리 학습에 실패했습니다. 조용한 곳에서 다시 녹음해주세요."
+        db.commit()
 
 
 @router.post("/devices/{device_id}/voices", status_code=201)
@@ -40,7 +57,7 @@ async def register_voice(
     db: Session = Depends(get_db),
     protector: Protector = Depends(get_current_protector),
 ):
-    """음성 녹음 등록 → CosyVoice 제로샷 화자 등록."""
+    """음성 녹음 등록 → Fish Audio 목소리 모델 생성."""
     device = get_owned_device(db, protector, device_id)
 
     if not file.filename:
@@ -67,25 +84,22 @@ async def register_voice(
     db.commit()
     db.refresh(voice)
 
-    # 2080ti CosyVoice 에 화자를 등록한다. 제로샷이라 수 초면 끝나므로 결과를 바로 받는다.
-    # voice.id 로 화자 식별자를 만든다(우리 목소리 행과 1:1로 묶임).
-    if cosyvoice.is_configured():
-        spk_id = f"spk_{voice.id}"
+    # Fish Audio 에 목소리 모델을 만든다. fast 모드라 대개 응답에서 바로 trained 다.
+    # 제목에 voice.id 를 넣어 Fish 콘솔에서도 우리 목소리 행과 맞춰 볼 수 있게 한다.
+    if fish_audio.is_configured():
         try:
-            speaker_id = await cosyvoice.enroll(spk_id, content, file.filename)
-        except cosyvoice.CosyVoiceError as e:
+            model_id, state = await fish_audio.create_model(
+                f"remory-voice-{voice.id}", content, file.filename
+            )
+        except fish_audio.FishAudioError as e:
             voice.status = "failed"
             voice.error_message = str(e)[:500]
             db.commit()
             raise APIError(502, "음성 등록 서버에 연결하지 못했습니다. 잠시 후 다시 시도해주세요.")
-        voice.status = "ready"
-        voice.progress = 100
-        voice.speaker_id = speaker_id
+        voice.speaker_id = model_id
         db.commit()
-
-        if device.user_id is not None:
-            notify_voice_ready(db, device.user_id, protector.id, voice.name)
-    # GPU_HOST 미설정이면 등록을 건너뛰고 training 상태로 둔다(데모/미연동).
+        _apply_state(db, voice, device, state)
+    # FISH_API_KEY 미설정이면 등록을 건너뛰고 training 상태로 둔다(데모/미연동).
 
     return envelope(voice_json(voice, device), "음성을 등록했습니다.", 201)
 
@@ -108,7 +122,7 @@ def list_voices(
 
 
 @router.get("/voices/{voice_id}/status")
-def get_voice_status(
+async def get_voice_status(
     voice_id: int,
     db: Session = Depends(get_db),
     protector: Protector = Depends(get_current_protector),
@@ -118,6 +132,16 @@ def get_voice_status(
     if voice is None:
         raise APIError(404, "음성을 찾을 수 없습니다.")
     device = get_owned_device(db, protector, voice.device_id)  # 권한 없으면 404
+
+    # 아직 학습 중인 모델이면 Fish 에 다시 물어본다. 확인이 안 되면 다음 폴링에 맡긴다.
+    if voice.status == "training" and voice.speaker_id and fish_audio.is_configured():
+        try:
+            state = await fish_audio.get_state(voice.speaker_id)
+        except fish_audio.FishAudioError:
+            state = None
+        if state:
+            _apply_state(db, voice, device, state)
+
     return envelope(
         {
             "voiceId": voice.id,
@@ -132,7 +156,7 @@ def get_voice_status(
 
 
 @router.delete("/voices/{voice_id}")
-def delete_voice(
+async def delete_voice(
     voice_id: int,
     db: Session = Depends(get_db),
     protector: Protector = Depends(get_current_protector),
@@ -153,9 +177,11 @@ def delete_voice(
     if voice.protector_id != protector.id:
         raise APIError(403, "직접 등록한 목소리만 삭제할 수 있습니다.")
 
-    # 업로드된 녹음 파일도 함께 정리
+    # 업로드된 녹음 파일과 Fish Audio 의 목소리 모델도 함께 정리
     if voice.audio_url:
         storage.delete(voice.audio_url)
+    if voice.speaker_id:
+        await fish_audio.delete_model(voice.speaker_id)
 
     was_default = device.default_voice_id == voice.id
     db.delete(voice)

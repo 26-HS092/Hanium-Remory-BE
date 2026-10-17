@@ -180,7 +180,7 @@ app/
 ├── deps.py        인증 의존성 (보호자 JWT / 기기 토큰)
 ├── errors.py      공통 응답 봉투 + 예외 핸들러
 ├── routers/       인증 · 계정/가족 · 인형 · 홈/콘텐츠 · 기록
-└── services/      권한검사 · SMS · 저장소(S3) · CosyVoice · LLM · 알림 생성
+└── services/      권한검사 · SMS · 저장소(S3) · Fish Audio(목소리 등록) · LLM · 알림 생성
 
 migrations/  Alembic 리비전      scripts/  리포트 배치 · 유지보수
 deploy/      systemd 유닛        tests/    pytest

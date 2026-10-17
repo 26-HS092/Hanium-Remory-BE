@@ -1,8 +1,10 @@
 """목소리 등록(voice-enroll) EC2 측 흐름 테스트.
 
-CosyVoice 제로샷은 등록이 수 초라 EC2 가 동기로 /enroll 을 호출하고 결과를 바로 받는다.
-- register_voice 가 CosyVoice 를 호출해 성공 시 ready(+speaker_id), 실패 시 failed 로 기록
+Fish Audio fast 모드는 모델 생성 응답에서 대개 바로 trained 라 EC2 가 동기로 결과를 받는다.
+- register_voice 가 Fish 에 모델을 만들어 성공 시 ready(+speaker_id=모델 ID), 실패 시 failed 로 기록
+- 아직 training 이면 상태 조회 때 Fish 에 다시 물어 ready 로 옮기는지
 - 상태 조회에 speakerId / errorMessage 가 실리는지
+- 삭제하면 Fish 모델도 지우는지
 """
 
 import pytest
@@ -15,7 +17,7 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import Device, FamilyMember, Protector, User, Voice
 from app.security import create_access_token
-from app.services import cosyvoice
+from app.services import fish_audio
 from app.services.storage import storage
 
 engine = create_engine(
@@ -88,38 +90,102 @@ def _upload(device_id: int, protector_id: int):
     )
 
 
-def test_register_enrolls_and_marks_ready(monkeypatch, world):
-    """CosyVoice 등록 성공 → 201 + ready + speaker_id(spk_<voiceId>)."""
+def test_register_creates_model_and_marks_ready(monkeypatch, world):
+    """Fish 모델 생성 성공(trained) → 201 + ready + speaker_id(모델 ID)."""
     monkeypatch.setattr(storage, "save", lambda *a, **k: "/uploads/voices/new.wav")
-    monkeypatch.setattr(cosyvoice, "is_configured", lambda: True)
+    monkeypatch.setattr(fish_audio, "is_configured", lambda: True)
 
     called = {}
 
-    async def fake_enroll(spk_id, audio, filename):
-        called.update(spk_id=spk_id, filename=filename, size=len(audio))
-        return spk_id  # CosyVoice 가 확정한 speaker_id
+    async def fake_create(title, audio, filename):
+        called.update(title=title, filename=filename, size=len(audio))
+        return "fish-model-1", "trained"
 
-    monkeypatch.setattr(cosyvoice, "enroll", fake_enroll)
+    monkeypatch.setattr(fish_audio, "create_model", fake_create)
 
     r = _upload(world["device"], world["me"])
     assert r.status_code == 201, r.text
     body = r.json()["data"]
     assert body["status"] == "ready"
-    assert body["speakerId"] == f"spk_{body['voiceId']}"
-    # 업로드한 파일이 그대로 CosyVoice 로 전달됐는지
-    assert called["spk_id"] == f"spk_{body['voiceId']}"
+    assert body["speakerId"] == "fish-model-1"
+    # 업로드한 파일이 그대로 Fish 로 전달됐는지
+    assert called["title"] == f"remory-voice-{body['voiceId']}"
     assert called["size"] == len(b"fake-audio-bytes")
 
 
-def test_register_marks_failed_when_server_unreachable(monkeypatch, world):
-    """CosyVoice 호출 실패 시 502 + 해당 voice 는 failed 로 남는다."""
+def test_training_model_becomes_ready_on_status_poll(monkeypatch, world):
+    """생성 응답이 training 이면 training 으로 두고, 상태 조회 때 trained 면 ready 로 옮긴다."""
     monkeypatch.setattr(storage, "save", lambda *a, **k: "/uploads/voices/new.wav")
-    monkeypatch.setattr(cosyvoice, "is_configured", lambda: True)
+    monkeypatch.setattr(fish_audio, "is_configured", lambda: True)
 
-    async def boom(spk_id, audio, filename):
-        raise cosyvoice.CosyVoiceError("연결 실패")
+    async def fake_create(title, audio, filename):
+        return "fish-model-2", "training"
 
-    monkeypatch.setattr(cosyvoice, "enroll", boom)
+    async def fake_state(model_id):
+        assert model_id == "fish-model-2"
+        return "trained"
+
+    monkeypatch.setattr(fish_audio, "create_model", fake_create)
+    monkeypatch.setattr(fish_audio, "get_state", fake_state)
+
+    body = _upload(world["device"], world["me"]).json()["data"]
+    assert body["status"] == "training"
+    assert body["speakerId"] == "fish-model-2"
+
+    s = client.get(f"/voices/{body['voiceId']}/status", headers=auth(world["me"])).json()["data"]
+    assert s["status"] == "ready"
+    assert s["progress"] == 100
+
+
+def test_failed_model_is_marked_failed(monkeypatch, world):
+    """Fish 가 학습 실패(failed)를 주면 failed + 재녹음 안내 사유를 남긴다."""
+    monkeypatch.setattr(storage, "save", lambda *a, **k: "/uploads/voices/new.wav")
+    monkeypatch.setattr(fish_audio, "is_configured", lambda: True)
+
+    async def fake_create(title, audio, filename):
+        return "fish-model-3", "failed"
+
+    monkeypatch.setattr(fish_audio, "create_model", fake_create)
+
+    body = _upload(world["device"], world["me"]).json()["data"]
+    s = client.get(f"/voices/{body['voiceId']}/status", headers=auth(world["me"])).json()["data"]
+    assert s["status"] == "failed"
+    assert s["errorMessage"]
+
+
+def test_delete_removes_fish_model(monkeypatch, world):
+    """목소리를 지우면 Fish 의 모델도 지운다."""
+    db = TestSession()
+    try:
+        v = db.get(Voice, world["voice"])
+        v.status = "ready"
+        v.speaker_id = "fish-model-9"
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(storage, "delete", lambda *a, **k: None)
+    deleted = []
+
+    async def fake_delete(model_id):
+        deleted.append(model_id)
+
+    monkeypatch.setattr(fish_audio, "delete_model", fake_delete)
+
+    r = client.delete(f"/voices/{world['voice']}", headers=auth(world["me"]))
+    assert r.status_code == 200, r.text
+    assert deleted == ["fish-model-9"]
+
+
+def test_register_marks_failed_when_server_unreachable(monkeypatch, world):
+    """Fish 호출 실패 시 502 + 해당 voice 는 failed 로 남는다."""
+    monkeypatch.setattr(storage, "save", lambda *a, **k: "/uploads/voices/new.wav")
+    monkeypatch.setattr(fish_audio, "is_configured", lambda: True)
+
+    async def boom(title, audio, filename):
+        raise fish_audio.FishAudioError("연결 실패")
+
+    monkeypatch.setattr(fish_audio, "create_model", boom)
 
     r = _upload(world["device"], world["me"])
     assert r.status_code == 502
@@ -134,9 +200,9 @@ def test_register_marks_failed_when_server_unreachable(monkeypatch, world):
 
 
 def test_register_skips_when_not_configured(monkeypatch, world):
-    """GPU_HOST 미설정이면 등록을 건너뛰고 training 으로 접수만 한다(데모)."""
+    """FISH_API_KEY 미설정이면 등록을 건너뛰고 training 으로 접수만 한다(데모)."""
     monkeypatch.setattr(storage, "save", lambda *a, **k: "/uploads/voices/new.wav")
-    monkeypatch.setattr(cosyvoice, "is_configured", lambda: False)
+    monkeypatch.setattr(fish_audio, "is_configured", lambda: False)
 
     r = _upload(world["device"], world["me"])
     assert r.status_code == 201
@@ -182,12 +248,12 @@ def test_ready_voice_alerts_only_the_registrant(monkeypatch, world):
         db.close()
 
     monkeypatch.setattr(storage, "save", lambda *a, **k: "/uploads/voices/new.wav")
-    monkeypatch.setattr(cosyvoice, "is_configured", lambda: True)
+    monkeypatch.setattr(fish_audio, "is_configured", lambda: True)
 
-    async def fake_enroll(spk_id, audio, filename):
-        return spk_id
+    async def fake_create(title, audio, filename):
+        return "fish-model-1", "trained"
 
-    monkeypatch.setattr(cosyvoice, "enroll", fake_enroll)
+    monkeypatch.setattr(fish_audio, "create_model", fake_create)
     assert _upload(world["device"], world["me"]).status_code == 201
 
     db = TestSession()
