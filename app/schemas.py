@@ -202,6 +202,14 @@ class DefaultVoiceRequest(CamelModel):
     voice_id: int = Field(alias="voiceId")
 
 
+class FishVoiceImportRequest(CamelModel):
+    """POST /devices/{deviceId}/voices/fish — Fish Audio 에 이미 있는 목소리 모델을 가져온다."""
+
+    name: str = Field(min_length=1, max_length=50, description="앱에 보일 이름")
+    # 모델 ID(32자리) 또는 fish.audio 의 모델 주소(https://fish.audio/m/<ID>/).
+    model_id: str = Field(alias="modelId", min_length=1, max_length=200)
+
+
 class DndRequest(CamelModel):
     """PUT /devices/{deviceId}/dnd."""
 
