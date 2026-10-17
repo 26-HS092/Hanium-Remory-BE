@@ -266,3 +266,90 @@ def test_ready_voice_alerts_only_the_registrant(monkeypatch, world):
         db.close()
     assert got == [(world["me"], notif.VOICE_READY_TITLE)]
     assert sibling_id not in [pid for pid, _ in got]
+
+
+# ── Fish 에 이미 있는 목소리 모델 가져오기 ─────────────────────────
+MODEL_ID = "c2045f5c866b4222a4a2c30b5b051f7e"
+
+
+def _import(device_id: int, protector_id: int, model_id: str = MODEL_ID, name: str = "차분한 목소리"):
+    return client.post(
+        f"/devices/{device_id}/voices/fish",
+        headers=auth(protector_id),
+        json={"name": name, "modelId": model_id},
+    )
+
+
+def _fake_model(state="trained", type_="tts"):
+    async def get_model(model_id):
+        return {"_id": model_id, "type": type_, "state": state, "title": "x"}
+
+    return get_model
+
+
+def test_import_fish_model_is_ready_right_away(monkeypatch, world):
+    """모델 ID 로 가져오면 녹음 없이 바로 ready, speakerId 는 그 모델 ID."""
+    monkeypatch.setattr(fish_audio, "is_configured", lambda: True)
+    monkeypatch.setattr(fish_audio, "get_model", _fake_model())
+
+    r = _import(world["device"], world["me"])
+    assert r.status_code == 201, r.text
+    body = r.json()["data"]
+    assert body["status"] == "ready"
+    assert body["speakerId"] == MODEL_ID
+    assert body["audioUrl"] is None
+
+    # 가져온 목소리를 인형 기본 목소리로 고를 수 있다.
+    r = client.patch(
+        f"/devices/{world['device']}/settings/voice",
+        headers=auth(world["me"]),
+        json={"voiceId": body["voiceId"]},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_import_accepts_fish_page_url(monkeypatch, world):
+    """fish.audio 모델 주소를 통째로 붙여 넣어도 ID 를 찾아낸다."""
+    monkeypatch.setattr(fish_audio, "is_configured", lambda: True)
+    monkeypatch.setattr(fish_audio, "get_model", _fake_model())
+
+    r = _import(world["device"], world["me"], f"https://fish.audio/m/{MODEL_ID}/")
+    assert r.status_code == 201, r.text
+    assert r.json()["data"]["speakerId"] == MODEL_ID
+
+
+def test_import_rejects_bad_or_unusable_models(monkeypatch, world):
+    """ID 꼴이 아니면 400, 없거나 남의 비공개면 404, 학습 전이면 400, 중복이면 409."""
+    monkeypatch.setattr(fish_audio, "is_configured", lambda: True)
+
+    assert _import(world["device"], world["me"], "not-a-model").status_code == 400
+
+    async def missing(model_id):
+        raise fish_audio.FishAudioError("없음", 404)
+
+    monkeypatch.setattr(fish_audio, "get_model", missing)
+    assert _import(world["device"], world["me"]).status_code == 404
+
+    monkeypatch.setattr(fish_audio, "get_model", _fake_model(state="training"))
+    assert _import(world["device"], world["me"]).status_code == 400
+
+    monkeypatch.setattr(fish_audio, "get_model", _fake_model())
+    assert _import(world["device"], world["me"]).status_code == 201
+    assert _import(world["device"], world["me"]).status_code == 409
+
+
+def test_deleting_imported_voice_keeps_fish_model(monkeypatch, world):
+    """가져온 목소리는 우리가 만든 게 아니라 지워도 Fish 모델은 지우지 않는다."""
+    monkeypatch.setattr(fish_audio, "is_configured", lambda: True)
+    monkeypatch.setattr(fish_audio, "get_model", _fake_model())
+    voice_id = _import(world["device"], world["me"]).json()["data"]["voiceId"]
+
+    deleted = []
+
+    async def fake_delete(model_id):
+        deleted.append(model_id)
+
+    monkeypatch.setattr(fish_audio, "delete_model", fake_delete)
+    r = client.delete(f"/voices/{voice_id}", headers=auth(world["me"]))
+    assert r.status_code == 200, r.text
+    assert deleted == []

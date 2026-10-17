@@ -3,10 +3,12 @@
 흐름: 가족이 녹음 업로드 → EC2 가 Fish Audio 에 비공개 목소리 모델 생성(fast, 보통 즉시)
       → status=ready(+speaker_id=모델 ID) → PATCH /devices/{id}/settings/voice 로 기본 음성 지정.
       생성 응답이 아직 trained 가 아니면 training 으로 두고, 상태 조회 때 Fish 에 다시 묻는다.
+Fish 에 이미 있는 목소리 모델(라이브러리·직접 만든 것)은 모델 ID 로 가져와 고를 수 있다.
 음성은 기기(device)에 묶이고, 누가 녹음했는지는 protector_id 로 남는다.
 """
 
 import os
+import re
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy import select
@@ -16,6 +18,7 @@ from ..database import get_db
 from ..deps import get_current_protector
 from ..errors import APIError, envelope
 from ..models import Protector, Voice
+from ..schemas import FishVoiceImportRequest
 from ..services import fish_audio
 from ..services.access import (
     ensure_default_voice,
@@ -104,6 +107,62 @@ async def register_voice(
     return envelope(voice_json(voice, device), "음성을 등록했습니다.", 201)
 
 
+# Fish 모델 ID 는 32자리 16진수다. fish.audio/m/<ID>/ 주소를 붙여 넣어도 찾아낸다.
+FISH_MODEL_ID = re.compile(r"[0-9a-f]{32}")
+
+
+@router.post("/devices/{device_id}/voices/fish", status_code=201)
+async def import_fish_voice(
+    device_id: int,
+    body: FishVoiceImportRequest,
+    db: Session = Depends(get_db),
+    protector: Protector = Depends(get_current_protector),
+):
+    """Fish Audio 에 이미 있는 목소리 모델을 인형 목소리 목록에 가져온다.
+
+    녹음 없이 모델 ID 만으로 들인다. 바로 쓸 수 있는(trained) TTS 모델만 받는다.
+    가져온 모델은 우리가 만든 게 아니라서, 목록에서 지워도 Fish 쪽은 지우지 않는다.
+    """
+    device = get_owned_device(db, protector, device_id)
+    if not fish_audio.is_configured():
+        raise APIError(503, "Fish Audio 가 아직 설정되지 않았습니다.")
+
+    match = FISH_MODEL_ID.search(body.model_id.strip().lower())
+    if match is None:
+        raise APIError(400, "Fish 모델 ID 를 확인해 주세요.")
+    model_id = match.group(0)
+
+    exists = db.scalars(
+        select(Voice).where(Voice.device_id == device.id, Voice.speaker_id == model_id)
+    ).first()
+    if exists is not None:
+        raise APIError(409, f"이미 '{exists.name}' 으로 등록된 목소리예요.")
+
+    try:
+        model = await fish_audio.get_model(model_id)
+    except fish_audio.FishAudioError as e:
+        if e.status in (403, 404):
+            raise APIError(404, "그 모델을 찾을 수 없어요. 공개 모델이거나 우리 계정의 모델이어야 해요.")
+        raise APIError(502, "음성 등록 서버에 연결하지 못했습니다. 잠시 후 다시 시도해주세요.")
+    if model.get("type") != "tts":
+        raise APIError(400, "말하기(TTS)용 모델만 가져올 수 있어요.")
+    if model.get("state") != "trained":
+        raise APIError(400, "아직 학습이 끝나지 않은 모델이에요.")
+
+    voice = Voice(
+        device_id=device.id,
+        protector_id=protector.id,
+        name=body.name.strip(),
+        status="ready",
+        progress=100,
+        speaker_id=model_id,
+    )
+    db.add(voice)
+    db.commit()
+    db.refresh(voice)
+    return envelope(voice_json(voice, device), "목소리를 가져왔습니다.", 201)
+
+
 @router.get("/devices/{device_id}/voices")
 def list_voices(
     device_id: int,
@@ -177,11 +236,12 @@ async def delete_voice(
     if voice.protector_id != protector.id:
         raise APIError(403, "직접 등록한 목소리만 삭제할 수 있습니다.")
 
-    # 업로드된 녹음 파일과 Fish Audio 의 목소리 모델도 함께 정리
+    # 녹음으로 만든 목소리는 녹음 파일과 Fish Audio 모델도 함께 정리한다.
+    # 모델 ID 로 가져온 목소리(녹음 없음)는 남의 것일 수 있어 Fish 쪽은 두고 목록에서만 뺀다.
     if voice.audio_url:
         storage.delete(voice.audio_url)
-    if voice.speaker_id:
-        await fish_audio.delete_model(voice.speaker_id)
+        if voice.speaker_id:
+            await fish_audio.delete_model(voice.speaker_id)
 
     was_default = device.default_voice_id == voice.id
     db.delete(voice)

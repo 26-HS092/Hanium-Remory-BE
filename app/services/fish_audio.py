@@ -8,6 +8,7 @@ train_mode=fast 는 보통 응답에서 바로 trained 로 오지만 보장되�
 """
 
 import logging
+from typing import Optional
 
 import httpx
 
@@ -19,7 +20,15 @@ BASE_URL = "https://api.fish.audio"
 
 
 class FishAudioError(Exception):
-    """Fish Audio 호출 실패(연결 불가·타임아웃·비정상 응답)."""
+    """Fish Audio 호출 실패(연결 불가·타임아웃·비정상 응답).
+
+    status 는 Fish 가 돌려준 HTTP 상태(연결 실패면 None). 404·403 이면 모델이
+    없거나 남의 비공개 모델이라 볼 수 없다는 뜻이다.
+    """
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
 
 
 def is_configured() -> bool:
@@ -67,7 +76,9 @@ async def create_model(title: str, audio: bytes, filename: str) -> tuple[str, st
             resp.status_code,
             resp.text[:300],
         )
-        raise FishAudioError(f"등록 서버가 거부했습니다(status={resp.status_code}).")
+        raise FishAudioError(
+            f"등록 서버가 거부했습니다(status={resp.status_code}).", resp.status_code
+        )
 
     try:
         body = resp.json()
@@ -76,8 +87,8 @@ async def create_model(title: str, audio: bytes, filename: str) -> tuple[str, st
         raise FishAudioError("등록 서버 응답에 모델 ID가 없습니다.") from e
 
 
-async def get_state(model_id: str) -> str:
-    """모델의 현재 state 를 다시 확인한다. 실패하면 FishAudioError."""
+async def get_model(model_id: str) -> dict:
+    """모델 정보(_id·title·state 등)를 읽는다. 실패하면 FishAudioError."""
     try:
         async with httpx.AsyncClient(timeout=settings.fish_timeout_sec) as client:
             resp = await client.get(f"{BASE_URL}/model/{model_id}", headers=_headers())
@@ -85,11 +96,18 @@ async def get_state(model_id: str) -> str:
         raise FishAudioError(f"등록 서버 연결 실패: {e}") from e
 
     if resp.status_code != 200:
-        raise FishAudioError(f"등록 서버가 거부했습니다(status={resp.status_code}).")
+        raise FishAudioError(
+            f"등록 서버가 거부했습니다(status={resp.status_code}).", resp.status_code
+        )
     try:
-        return resp.json().get("state") or "created"
+        return resp.json()
     except ValueError as e:
         raise FishAudioError("등록 서버 응답을 읽지 못했습니다.") from e
+
+
+async def get_state(model_id: str) -> str:
+    """모델의 현재 state 를 다시 확인한다. 실패하면 FishAudioError."""
+    return (await get_model(model_id)).get("state") or "created"
 
 
 async def delete_model(model_id: str) -> None:
