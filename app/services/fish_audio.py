@@ -111,7 +111,10 @@ async def get_state(model_id: str) -> str:
 
 
 async def delete_model(model_id: str) -> None:
-    """Fish Audio 의 모델을 지운다. 실패해도 우리 쪽 삭제는 막지 않도록 로그만 남긴다."""
+    """Fish Audio 의 모델을 지운다. 실패해도 우리 쪽 삭제는 막지 않도록 로그만 남긴다.
+
+    남의 모델(라이브러리에서 가져온 것)은 Fish 가 403 으로 거부한다. 그건 실패가 아니다.
+    """
     if not is_configured():
         return
     try:
@@ -120,7 +123,9 @@ async def delete_model(model_id: str) -> None:
     except httpx.HTTPError as e:
         logger.error("Fish Audio 모델 삭제 실패 model_id=%s: %s", model_id, e)
         return
-    if resp.status_code not in (200, 204, 404):
+    if resp.status_code == 403:
+        logger.info("Fish Audio 모델이 우리 것이 아니라 남겨 둔다 model_id=%s", model_id)
+    elif resp.status_code not in (200, 204, 404):
         logger.error(
             "Fish Audio 모델 삭제 비정상 응답 model_id=%s status=%s body=%s",
             model_id,

@@ -54,6 +54,7 @@ from ..services.access import (
 )
 from ..services.emotion_codes import normalize_emotion
 from ..services.storage import storage
+from ..services.voice_sync import prune_deleted_fish_voices
 from ..services.notifications import (
     notify_elder_reply,
     notify_message_delivered,
@@ -159,12 +160,14 @@ def issue_device_token(
 
 # ── 인형 상태·설정 ───────────────────────────────────
 @router.get("/{device_id}/settings")
-def get_device_settings(
+async def get_device_settings(
     device_id: int,
     device: Device = Depends(authorize_device_read),
     db: Session = Depends(get_db),
 ):
     """연결 상태·배터리·등록 음성·볼륨·기본 음성. 앱(JWT)·인형(기기 토큰) 모두 조회."""
+    # fish.audio 에서 지운 목소리는 여기서도 빠지게 한다(인형도 지워진 모델로 말하지 않게).
+    await prune_deleted_fish_voices(db, device)
     return envelope(device_json(db, device), "OK", 200)
 
 
