@@ -4,6 +4,7 @@
       → status=ready(+speaker_id=모델 ID) → PATCH /devices/{id}/settings/voice 로 기본 음성 지정.
       생성 응답이 아직 trained 가 아니면 training 으로 두고, 상태 조회 때 Fish 에 다시 묻는다.
 Fish 에 이미 있는 목소리 모델(라이브러리·직접 만든 것)은 모델 ID 로 가져와 고를 수 있다.
+fish.audio 에서 모델을 지우면 목록을 볼 때 앱에서도 빠지고, 앱에서 지우면 Fish 모델도 지운다.
 음성은 기기(device)에 묶이고, 누가 녹음했는지는 protector_id 로 남는다.
 """
 
@@ -21,13 +22,13 @@ from ..models import Protector, Voice
 from ..schemas import FishVoiceImportRequest
 from ..services import fish_audio
 from ..services.access import (
-    ensure_default_voice,
     get_owned_device,
     voice_json,
     voice_owners,
 )
 from ..services.notifications import notify_voice_ready
 from ..services.storage import storage
+from ..services.voice_sync import prune_deleted_fish_voices, remove_voice
 
 router = APIRouter(tags=["voices"])
 
@@ -121,7 +122,6 @@ async def import_fish_voice(
     """Fish Audio 에 이미 있는 목소리 모델을 인형 목소리 목록에 가져온다.
 
     녹음 없이 모델 ID 만으로 들인다. 바로 쓸 수 있는(trained) TTS 모델만 받는다.
-    가져온 모델은 우리가 만든 게 아니라서, 목록에서 지워도 Fish 쪽은 지우지 않는다.
     """
     device = get_owned_device(db, protector, device_id)
     if not fish_audio.is_configured():
@@ -164,13 +164,14 @@ async def import_fish_voice(
 
 
 @router.get("/devices/{device_id}/voices")
-def list_voices(
+async def list_voices(
     device_id: int,
     db: Session = Depends(get_db),
     protector: Protector = Depends(get_current_protector),
 ):
     """등록된 음성 목록 (인형 목소리 선택·학습 상태 표시용)."""
     device = get_owned_device(db, protector, device_id)
+    await prune_deleted_fish_voices(db, device)
     voices = db.scalars(
         select(Voice).where(Voice.device_id == device.id).order_by(Voice.created_at)
     ).all()
@@ -236,21 +237,8 @@ async def delete_voice(
     if voice.protector_id != protector.id:
         raise APIError(403, "직접 등록한 목소리만 삭제할 수 있습니다.")
 
-    # 녹음으로 만든 목소리는 녹음 파일과 Fish Audio 모델도 함께 정리한다.
-    # 모델 ID 로 가져온 목소리(녹음 없음)는 남의 것일 수 있어 Fish 쪽은 두고 목록에서만 뺀다.
-    if voice.audio_url:
-        storage.delete(voice.audio_url)
-        if voice.speaker_id:
-            await fish_audio.delete_model(voice.speaker_id)
-
-    was_default = device.default_voice_id == voice.id
-    db.delete(voice)
-    db.flush()
-
-    # 쓰던 목소리를 지웠으면 기본 목소리로 되돌린다 (인형이 벙어리가 되지 않게).
-    if was_default:
-        device.default_voice_id = None
-        ensure_default_voice(db, device)
+    # 녹음 파일과 Fish 모델도 함께 지워 fish.audio 에서도 사라지게 한다.
+    await remove_voice(db, device, voice)
 
     db.commit()
     return envelope({"voiceId": voice_id}, "음성을 삭제했습니다.", 200)
