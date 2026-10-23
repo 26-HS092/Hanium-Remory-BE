@@ -38,7 +38,12 @@ def assetlinks():
     return JSONResponse(
         [
             {
-                "relation": ["delegate_permission/common.get_login_creds"],
+                # 예전 Play 서비스(FIDO2) 는 handle_all_urls 도 있어야 도메인을
+                # 확인해 준다. 없으면 'RP ID cannot be validated' 로 등록이 막힌다.
+                "relation": [
+                    "delegate_permission/common.handle_all_urls",
+                    "delegate_permission/common.get_login_creds",
+                ],
                 "target": {
                     "namespace": "android_app",
                     "package_name": settings.android_package_name,
