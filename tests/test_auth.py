@@ -186,3 +186,32 @@ def test_faceid_first_signup(monkeypatch):
     r = client.post("/auth/passkey/authentication/options", json={"phoneNumber": PHONE})
     assert r.status_code == 200, r.text
     assert r.json()["data"]["allowCredentials"][0]["id"] == "FACEIDcredential-1"
+
+
+def test_new_device_adds_passkey_to_existing_account(monkeypatch):
+    """기기를 바꾸면 번호를 다시 인증하고 새 패스키를 같은 계정에 단다."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "otp_send_cooldown_sec", 0)
+    first = _register(monkeypatch, _verify_phone())
+
+    reg_token = _verify_phone()
+    headers = {"Authorization": f"Bearer {reg_token}"}
+    r = client.post("/auth/passkey/registration/options", json={}, headers=headers)
+    assert r.status_code == 200, r.text
+    opts = r.json()["data"]
+
+    client_data = _b64url({"type": "webauthn.create", "challenge": opts["challenge"], "origin": "https://remory.app"})
+    body = {
+        "credentialId": "AAAAcredential-2",
+        "clientDataJSON": client_data,
+        "attestationObject": "ZmFrZQ",
+    }
+    r = client.post("/auth/passkey/registration", json=body, headers=headers)
+    assert r.status_code == 201, r.text
+    assert r.json()["data"]["protectorId"] == first["protectorId"]
+
+    # 두 기기 패스키 모두 로그인 후보로 나온다.
+    r = client.post("/auth/passkey/authentication/options", json={"phoneNumber": PHONE})
+    ids = {c["id"] for c in r.json()["data"]["allowCredentials"]}
+    assert ids == {"AAAAcredential-1", "AAAAcredential-2"}
