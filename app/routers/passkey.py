@@ -64,6 +64,39 @@ def _issue_tokens(db: Session, protector: Protector) -> dict:
     }
 
 
+def _protector_by_phone(db: Session, phone: Optional[str]) -> Optional[Protector]:
+    if not phone:
+        return None
+    return db.scalars(select(Protector).where(Protector.phone_number == phone)).first()
+
+
+def _add_credential(db: Session, protector: Protector, body, verified, ch) -> dict:
+    """기기를 바꾼 보호자가 번호 인증 후 새 패스키를 등록한 경우.
+
+    번호 인증으로 본인임을 확인했으니 기존 계정에 패스키를 더하고 로그인시킨다.
+    예전 기기의 패스키도 그대로 둔다.
+    """
+    if db.scalars(
+        select(Credential).where(Credential.credential_id == body.credential_id)
+    ).first():
+        raise APIError(409, "이미 등록된 패스키입니다.")
+
+    db.add(
+        Credential(
+            protector_id=protector.id,
+            credential_id=body.credential_id,
+            public_key=verified.credential_public_key,
+            sign_count=verified.sign_count,
+        )
+    )
+    db.delete(ch)
+
+    tokens = _issue_tokens(db, protector)
+    tokens["linkedUser"] = None
+    db.commit()
+    return envelope(tokens, "새 기기에 패스키를 등록했습니다.", 201)
+
+
 # ── 등록 ─────────────────────────────────────────────
 @router.post("/registration/options")
 def registration_options(
@@ -74,15 +107,16 @@ def registration_options(
     """WebAuthn 등록에 필요한 challenge 및 옵션을 발급한다.
 
     - register 토큰이 있으면(번호 먼저 인증한 경우) 그 번호에 묶는다.
+      이미 가입된 번호면 기기를 바꾼 경우다. 그 계정에 패스키를 하나 더 단다.
     - 없으면 Face-ID-first: 번호 없이 challenge만 발급(번호는 나중에 연결).
     """
     phone = normalize_phone(phone_sub) if phone_sub else None
-    if phone and db.scalars(select(Protector).where(Protector.phone_number == phone)).first():
-        raise APIError(409, "이미 가입된 전화번호입니다.")
+    existing = _protector_by_phone(db, phone)
 
-    user_handle = secrets.token_bytes(16)
+    # 같은 계정의 패스키는 같은 user handle 이어야 로그인 때 userHandle 이 맞는다.
+    user_handle = existing.user_handle if existing else secrets.token_bytes(16)
     challenge = wa.new_challenge()
-    display_name = body.display_name or "보호자"
+    display_name = (existing.display_name if existing else None) or body.display_name or "보호자"
 
     db.add(
         WebAuthnChallenge(
@@ -126,7 +160,8 @@ def registration(
     """attestation을 검증하고 보호자 계정 + credential을 저장한다.
 
     - 번호 토큰이 있으면 즉시 완전 가입(정식 토큰 발급). 초대 코드를 함께
-      보내면 가족 연결까지 여기서 끝난다.
+      보내면 가족 연결까지 여기서 끝난다. 이미 가입된 번호면 새 기기의
+      패스키를 그 계정에 더하고 로그인시킨다.
     - 없으면 Face-ID-first: 번호 없는 계정 생성 후 onboardingToken 발급
       (다음 단계에서 전화번호를 연결한다. 초대 코드도 그 단계에서 보낸다).
     """
@@ -141,8 +176,9 @@ def registration(
         logger.warning("attestation 검증 실패: %s", e)
         raise APIError(400, "패스키 검증에 실패했습니다.")
 
-    if phone and db.scalars(select(Protector).where(Protector.phone_number == phone)).first():
-        raise APIError(409, "이미 가입된 전화번호입니다.")
+    existing = _protector_by_phone(db, phone)
+    if existing is not None:
+        return _add_credential(db, existing, body, verified, ch)
 
     protector = Protector(
         phone_number=phone,  # None 가능(Face-ID-first)
