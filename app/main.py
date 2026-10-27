@@ -22,6 +22,7 @@ from .routers import (
     files,
     home,
     invites,
+    legal,
     medications,
     memories,
     notifications,
@@ -69,6 +70,7 @@ app.include_router(phone.router)
 app.include_router(passkey.router)
 app.include_router(token.router)
 app.include_router(wellknown.router)
+app.include_router(legal.router)
 
 # 설정 화면
 app.include_router(protectors.router)

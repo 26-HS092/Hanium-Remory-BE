@@ -75,8 +75,8 @@ class Settings(BaseSettings):
     service_version: str = "1.0.2"
     service_min_supported_version: str = "1.0.0"
     terms_url: str = "https://remory.app/terms"
-    privacy_url: str = "https://remory.app/privacy"
-    support_email: str = "support@remory.app"
+    privacy_url: str = "https://32-184-124-116.sslip.io/privacy"
+    support_email: str = "iseul9644@gmail.com"
     support_phone: str = ""
 
     # 업로드 저장소: local | s3
