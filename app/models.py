@@ -354,6 +354,8 @@ class Memory(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     image_url: Mapped[str] = mapped_column(String(500))
+    # 자르기 전 사진. 인형이 사진 내용을 읽어 기억을 만들 때 쓴다(화면에는 image_url).
+    original_image_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     title: Mapped[str] = mapped_column(String(100))
     period: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # 예: "1980년대"
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

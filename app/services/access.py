@@ -300,6 +300,8 @@ def memory_json(memory: Memory) -> dict:
     return {
         "memoryId": memory.id,
         "imageUrl": memory.image_url,
+        # 인형은 사진 내용을 읽을 때 이것을 쓴다. 예전 추억은 자르기 전 사진이 없다.
+        "originalImageUrl": memory.original_image_url or memory.image_url,
         "title": memory.title,
         "period": memory.period,
         "description": memory.description,

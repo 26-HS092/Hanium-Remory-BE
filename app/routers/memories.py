@@ -24,10 +24,12 @@ def create_memory(
     """추억 등록. 사진은 POST /files/images 로 먼저 올리고 그 URL을 보낸다."""
     user = get_owned_user(db, protector, user_id)
     ensure_own_image(body.image_url, protector.id)
+    ensure_own_image(body.original_image_url, protector.id)
 
     memory = Memory(
         user_id=user.id,
         image_url=body.image_url,
+        original_image_url=body.original_image_url,
         title=body.title.strip(),
         period=body.period,
         description=body.description,

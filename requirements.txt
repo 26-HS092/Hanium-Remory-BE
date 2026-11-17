@@ -9,6 +9,8 @@ PyJWT>=2.8
 httpx>=0.27
 python-multipart>=0.0.9
 boto3>=1.34
+# 업로드 사진을 화면용 크기로 줄인다(app/services/images.py).
+Pillow>=10
 alembic>=1.13
 groq>=1.0,<2
 solapi>=5,<6
