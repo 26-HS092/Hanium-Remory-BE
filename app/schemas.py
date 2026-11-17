@@ -368,6 +368,22 @@ class MemoryCreateRequest(CamelModel):
     description: Optional[str] = None
 
 
+class MemoryUpdateRequest(CamelModel):
+    """PATCH /memories/{id}. 보내지 않은 필드는 그대로 둔다.
+
+    사진을 바꿀 때는 imageUrl 과 originalImageUrl 을 같이 보낸다. imageUrl 만
+    보내면 예전 원본이 남아 인형이 다른 사진을 읽게 되므로 원본은 지운다.
+    """
+
+    image_url: Optional[StorageUrl] = Field(default=None, alias="imageUrl", max_length=500)
+    original_image_url: Optional[StorageUrl] = Field(
+        default=None, alias="originalImageUrl", max_length=500
+    )
+    title: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    period: Optional[str] = Field(default=None, max_length=50)
+    description: Optional[str] = None
+
+
 # ── 가족 대화 ────────────────────────────────────────
 class ChatMessageCreateRequest(CamelModel):
     """POST /users/{id}/chat/messages. 글이나 사진 중 하나는 있어야 한다."""
