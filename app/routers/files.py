@@ -7,6 +7,8 @@
 누구 사진인지는 userId 로 받는다. 프로필 사진처럼 어르신이 없는 이미지는 생략한다.
 
 올라온 사진은 화면용(긴 변 1600px JPEG)으로 줄여 저장한다(services.images).
+추억 사진은 앱에서 5:3 으로 잘라 올리는데, 인형은 사진 내용을 읽어 기억을 만든다.
+잘린 부분이 기억에서 빠지지 않게 자르기 전 사진을 original 로 함께 받아 따로 둔다.
 """
 
 import os
@@ -32,6 +34,7 @@ MAX_BYTES = 10 * 1024 * 1024  # 10MB
 @router.post("/images")
 async def upload_image(
     file: UploadFile = File(...),
+    original: Optional[UploadFile] = File(default=None),
     user_id: Optional[int] = Form(default=None, alias="userId"),
     db: Session = Depends(get_db),
     protector: Protector = Depends(get_current_protector),
@@ -40,15 +43,18 @@ async def upload_image(
 
     userId 는 사진의 주인이 될 어르신. 연결되지 않은 어르신을 넣으면 404 다.
     프로필 사진처럼 어르신이 정해지지 않는 경우에만 생략한다.
+    original 은 자르기 전 사진(선택). 보내면 originalUrl 도 함께 돌려준다.
     """
     if user_id is not None:
         # 권한 없는 어르신 폴더에 파일을 넣지 못하게 여기서 막는다.
         get_owned_user(db, protector, user_id)
 
     prefix = image_prefix(user_id, protector.id)
-    url = storage.save(await _read_display(file), ".jpg", prefix=prefix)
+    data = {"imageUrl": storage.save(await _read_display(file), ".jpg", prefix=prefix)}
+    if original is not None:
+        data["originalUrl"] = storage.save(await _read_display(original), ".jpg", prefix=prefix)
 
-    return envelope({"imageUrl": url}, "업로드했습니다.", 200)
+    return envelope(data, "업로드했습니다.", 200)
 
 
 async def _read_display(file: UploadFile) -> bytes:

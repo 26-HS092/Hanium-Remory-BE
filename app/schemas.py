@@ -359,6 +359,10 @@ class MemoryCreateRequest(CamelModel):
     """POST /users/{id}/memories."""
 
     image_url: StorageUrl = Field(alias="imageUrl", max_length=500)
+    # 자르기 전 사진(POST /files/images 의 originalUrl). 없으면 imageUrl 을 쓴다.
+    original_image_url: Optional[StorageUrl] = Field(
+        default=None, alias="originalImageUrl", max_length=500
+    )
     title: str = Field(min_length=1, max_length=100)
     period: Optional[str] = Field(default=None, max_length=50)  # 예: "1980년대"
     description: Optional[str] = None

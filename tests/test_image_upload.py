@@ -125,6 +125,54 @@ def test_small_photo_is_not_enlarged(auth, tmp_path):
     assert _stored(tmp_path, r.json()["data"]["imageUrl"]).size == (500, 300)
 
 
+def test_original_is_stored_separately_and_kept_on_memory(auth, tmp_path):
+    headers, user_id = auth
+    r = client.post(
+        "/files/images",
+        headers=headers,
+        data={"userId": str(user_id)},
+        files={
+            "file": ("crop.jpg", _jpeg((1000, 600)), "image/jpeg"),
+            "original": ("full.jpg", _jpeg((3000, 3000)), "image/jpeg"),
+        },
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()["data"]
+    assert data["originalUrl"] != data["imageUrl"]
+    assert _stored(tmp_path, data["originalUrl"]).size == (1600, 1600)
+
+    r = client.post(
+        f"/users/{user_id}/memories",
+        headers=headers,
+        json={
+            "imageUrl": data["imageUrl"],
+            "originalImageUrl": data["originalUrl"],
+            "title": "제주 여행",
+        },
+    )
+    assert r.status_code == 201, r.text
+    memory = r.json()["data"]
+    assert memory["imageUrl"] == data["imageUrl"]
+    assert memory["originalImageUrl"] == data["originalUrl"]
+
+
+def test_memory_without_original_falls_back_to_image(auth, tmp_path):
+    headers, user_id = auth
+    r = client.post(
+        "/files/images",
+        headers=headers,
+        data={"userId": str(user_id)},
+        files={"file": ("crop.jpg", _jpeg((1000, 600)), "image/jpeg")},
+    )
+    url = r.json()["data"]["imageUrl"]
+    r = client.post(
+        f"/users/{user_id}/memories",
+        headers=headers,
+        json={"imageUrl": url, "title": "옛집"},
+    )
+    assert r.json()["data"]["originalImageUrl"] == url
+
+
 def test_broken_image_is_rejected(auth):
     headers, user_id = auth
     r = client.post(
