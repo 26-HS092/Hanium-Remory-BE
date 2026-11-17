@@ -5,6 +5,8 @@
 
 저장 키는 어르신별로, 그 아래 올린 보호자별로 나뉜다(services.storage.image_prefix).
 누구 사진인지는 userId 로 받는다. 프로필 사진처럼 어르신이 없는 이미지는 생략한다.
+
+올라온 사진은 화면용(긴 변 1600px JPEG)으로 줄여 저장한다(services.images).
 """
 
 import os
@@ -18,6 +20,7 @@ from ..deps import get_current_protector
 from ..errors import APIError, envelope
 from ..models import Protector
 from ..services.access import get_owned_user
+from ..services.images import to_display_jpeg
 from ..services.storage import image_prefix, storage
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -42,6 +45,14 @@ async def upload_image(
         # 권한 없는 어르신 폴더에 파일을 넣지 못하게 여기서 막는다.
         get_owned_user(db, protector, user_id)
 
+    prefix = image_prefix(user_id, protector.id)
+    url = storage.save(await _read_display(file), ".jpg", prefix=prefix)
+
+    return envelope({"imageUrl": url}, "업로드했습니다.", 200)
+
+
+async def _read_display(file: UploadFile) -> bytes:
+    """올라온 이미지를 검사하고 화면용 JPEG 로 줄여 준다."""
     if not file.filename:
         raise APIError(400, "파일 이름이 없습니다.")
 
@@ -53,6 +64,4 @@ async def upload_image(
     if len(content) > MAX_BYTES:
         raise APIError(400, "10MB 이하의 이미지만 올릴 수 있습니다.")
 
-    url = storage.save(content, ext, prefix=image_prefix(user_id, protector.id))
-
-    return envelope({"imageUrl": url}, "업로드했습니다.", 200)
+    return to_display_jpeg(content)
