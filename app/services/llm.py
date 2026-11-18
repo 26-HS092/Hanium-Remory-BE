@@ -1,4 +1,7 @@
-"""리포트 문구를 LLM 으로 만든다 (Groq). 데일리와 주간 둘 다 여기서 쓴다.
+"""리포트 문구를 LLM 으로 만든다. 데일리와 주간 둘 다 여기서 쓴다.
+
+LLM_MODEL 이 claude 로 시작하면 Claude(ANTHROPIC_API_KEY), 아니면 Groq
+(GROQ_API_KEY) 를 부른다. LLM_MODEL=claude 로만 적으면 CLAUDE_DEFAULT_MODEL 을 쓴다.
 
 숫자를 문장으로 바꾸는 일은 규칙으로 짜면 금방 어색해진다(가족과 0번,
 대화만 1번 같은 조합이 계속 늘어난다). 요약과 제안 두 문장만 모델에게 맡긴다.
@@ -34,6 +37,12 @@ logger = logging.getLogger("remory.llm")
 # 이 값을 키워도 된다.
 MAX_OUTPUT_TOKENS = 900
 
+# LLM_MODEL=claude 로만 적었을 때 쓸 모델.
+CLAUDE_DEFAULT_MODEL = "claude-opus-5-5"
+# Claude 는 답하기 전에 생각(thinking)을 하므로 출력 한도를 넉넉히 둔다.
+# Groq 처럼 분당 출력 한도에 걸릴 일이 없어 900 으로 묶을 이유가 없다.
+CLAUDE_MAX_OUTPUT_TOKENS = 16000
+
 # 마지막으로 모델을 부른 시각. 잇따라 부르지 않으려고 든다.
 _last_call_at = 0.0
 _call_lock = threading.Lock()
@@ -64,12 +73,102 @@ def _is_rate_limited(error: Exception) -> bool:
     return "rate_limit" in text or "429" in text or "too large" in text
 
 
+def _use_claude() -> bool:
+    return settings.llm_model.strip().lower().startswith("claude")
+
+
+def _claude_model() -> str:
+    """LLM_MODEL=claude 면 기본 모델, claude-sonnet-5-5 처럼 적었으면 그 모델."""
+    name = settings.llm_model.strip()
+    return CLAUDE_DEFAULT_MODEL if name.lower() == "claude" else name
+
+
+def _configured() -> bool:
+    """고른 모델에 맞는 키가 있는지. 없으면 모델을 부르지 않고 규칙 기반 문구로 간다."""
+    return bool(settings.anthropic_api_key if _use_claude() else settings.groq_api_key)
+
+
 def _ask(system: str, user: str, schema, temperature: float):
     """모델에게 한 번 묻고 [schema] 로 받아 온다. 못 받으면 None.
 
     부르는 쪽은 모두 규칙 기반 문구로 물러날 수 있으므로, 여기서 나는 문제는
     로그만 남기고 None 을 준다. 배치가 멈추지 않는 편이 낫다.
     """
+    if _use_claude():
+        return _ask_claude(system, user, schema)
+    return _ask_groq(system, user, schema, temperature)
+
+
+# 구조화 출력(json_schema)이 받지 않는 제약. 길이·개수 제한은 받아 온 뒤
+# pydantic 이 다시 검사하므로 스키마에서는 빼도 된다.
+_UNSUPPORTED_SCHEMA_KEYS = {"title", "default", "minLength", "maxLength", "minItems", "maxItems"}
+
+
+def _output_schema(node):
+    """pydantic 스키마를 구조화 출력용으로 다듬는다. 객체는 모든 필드를 필수로, 추가 필드는 막는다."""
+    if isinstance(node, list):
+        return [_output_schema(n) for n in node]
+    if not isinstance(node, dict):
+        return node
+    out = {
+        k: _output_schema(v)
+        for k, v in node.items()
+        if k not in _UNSUPPORTED_SCHEMA_KEYS
+        or k in ("properties", "$defs")  # 필드 이름이 title 같은 경우를 지키려고
+    }
+    if out.get("type") == "object" and "properties" in out:
+        out["required"] = list(out["properties"])
+        out["additionalProperties"] = False
+    return out
+
+
+def _ask_claude(system: str, user: str, schema):
+    """Claude 로 묻는다. 구조화 출력으로 [schema] 꼴의 JSON 만 받는다.
+
+    temperature 는 넘기지 않는다(최신 API 버전은 받지 않는다). 안전 분류기가
+    거절하면 서버가 다른 모델로 다시 해 보게 fallbacks 를 켠다.
+    429·5xx·연결 오류는 SDK 가 알아서 다시 시도한다.
+    """
+    if not settings.anthropic_api_key:
+        return None
+
+    try:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        response = client.beta.messages.create(
+            model=_claude_model(),
+            max_tokens=CLAUDE_MAX_OUTPUT_TOKENS,
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            output_config={
+                "format": {
+                    "type": "json_schema",
+                    "schema": _output_schema(schema.model_json_schema()),
+                }
+            },
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+    except Exception as e:
+        logger.warning("Claude 호출 실패(%s: %s). 기본 문구를 쓴다.", type(e).__name__, e)
+        return None
+
+    if response.stop_reason != "end_turn":
+        # refusal(대체 모델까지 거절) 이거나 max_tokens 로 잘린 경우.
+        logger.warning("Claude 응답이 끝나지 않음(stop_reason=%s). 기본 문구를 쓴다.", response.stop_reason)
+        return None
+
+    raw = next((b.text for b in response.content if b.type == "text"), "")
+    try:
+        return schema.model_validate(json.loads(raw))
+    except (json.JSONDecodeError, ValidationError) as e:
+        logger.warning("응답 형식이 어긋남(%s). 기본 문구를 쓴다.", e)
+        return None
+
+
+def _ask_groq(system: str, user: str, schema, temperature: float):
+    """Groq 로 묻는다. 무료 등급 한도에 걸리지 않게 쉬어 가며 부른다."""
     if not settings.groq_api_key:
         return None
 
@@ -278,10 +377,7 @@ def write_conversation_excerpt(name: str, numbered: str) -> Optional[list[dict]]
     시각은 모델에게 맡기지 않는다 — 번호만 고르게 하고, 부르는 쪽이 그 번호로
     실제 시각을 되찾아 붙인다. 모델이 시각을 지어낼 자리를 아예 없앤다.
     """
-    if not settings.groq_api_key or not numbered:
-        return None
-
-    if not numbered:
+    if not _configured() or not numbered:
         return None
     parsed = _ask(
         EXCERPT_SYSTEM,
