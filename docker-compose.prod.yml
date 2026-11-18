@@ -62,6 +62,7 @@ services:
       # 리포트 문구 생성. 비우면 규칙 기반 문구로 물러난다.
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-qwen/qwen3.8-27b}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
 
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       # FCM 푸시 발송용 서비스 계정 키(JSON 내용 그대로). 비우면 푸시를

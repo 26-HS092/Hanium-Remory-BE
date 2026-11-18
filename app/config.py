@@ -49,7 +49,11 @@ class Settings(BaseSettings):
     # 리포트는 밤에 도는 배치라 빨리 끝날 이유가 없다. 쉬어 가며 부른다.
     # 등급을 올렸으면 0 으로 두면 된다.
     llm_min_gap_sec: float = 65.0
+    # claude 로 시작하면 Claude(anthropic_api_key), 아니면 Groq 모델 이름이다.
+    # claude 로만 적으면 app/services/llm.py 의 CLAUDE_DEFAULT_MODEL 을 쓴다.
     llm_model: str = "qwen/qwen3.8-27b"
+    # 리포트 문구 생성(Claude). LLM_MODEL=claude 일 때 쓴다.
+    anthropic_api_key: str = ""
 
     # 알림 생성
     # 부정 감정이 이 횟수만큼 연달아 기록되면 긴급 알림을 만든다.
