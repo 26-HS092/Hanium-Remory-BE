@@ -410,6 +410,10 @@ class SafetyEvent(Base):
     kind: self_harm(자해) | harm_others(타해) | medical(의료 판단)
         | abuse(학대 정황) | profanity(거친 말)
 
+    urgent: 인형이 '긴급' 으로 본 신호인지. False 는 '지켜볼 신호'(LLM 만 위험으로
+        보고 소형 모델은 아니라고 본 것)라 즉시 알리지 않고 리포트에만 담긴다.
+    source: 누가 잡았는지 — rule | llm | llm+model | model. 나중에 오탐을 따져 보려고.
+
     발췌는 그때 하신 말의 일부다. 민감한 내용이라 발화(utterances)와 같은
     기간만 두고 데일리 배치가 함께 지운다. 리포트 문구는 남으므로 무슨 일이
     있었는지는 나중에도 알 수 있다.
@@ -422,6 +426,8 @@ class SafetyEvent(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     kind: Mapped[str] = mapped_column(String(20))
     excerpt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    urgent: Mapped[bool] = mapped_column(Boolean, default=True)
+    source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

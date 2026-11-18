@@ -457,6 +457,83 @@ def test_urgent_off_means_no_self_harm_alert(paired):
     assert result["alerted"] == 1
 
 
+def test_watch_only_self_harm_is_recorded_but_not_alerted(paired, fcm_ready):
+    """두 단계 알림. 인형이 '지켜볼 신호'(urgent: false)로 보낸 자해는 바로 알리지
+    않는다 — LLM 혼자 본 위험은 오탐이 많다. 기록은 남아 그날 리포트에 담긴다."""
+    db = TestSession()
+    try:
+        db.add(PushToken(protector_id=paired["me"], token="live-me"))
+        db.commit()
+    finally:
+        db.close()
+
+    result = data(
+        client.post(
+            f"/devices/{paired['device']}/safety-events",
+            json={"kind": "self_harm", "excerpt": "다 귀찮다",
+                  "urgent": False, "source": "llm"},
+            headers=device_auth(),
+        )
+    )
+    assert result["alerted"] == 0
+
+    db = TestSession()
+    try:
+        event = db.scalars(select(SafetyEvent)).one()
+        assert (event.kind, event.urgent, event.source) == ("self_harm", False, "llm")
+        assert db.scalars(select(Notification)).all() == []
+    finally:
+        db.close()
+    assert fcm_ready == []
+
+
+def test_urgent_self_harm_from_device_alerts(paired):
+    """인형이 긴급으로 보낸 자해는 지금처럼 바로 알린다."""
+    result = data(
+        client.post(
+            f"/devices/{paired['device']}/safety-events",
+            json={"kind": "self_harm", "excerpt": "살기 싫어",
+                  "urgent": True, "source": "llm+model"},
+            headers=device_auth(),
+        )
+    )
+    assert result["alerted"] == 2
+
+    db = TestSession()
+    try:
+        event = db.scalars(select(SafetyEvent)).one()
+        assert (event.urgent, event.source) == (True, "llm+model")
+    finally:
+        db.close()
+
+
+def test_old_device_without_urgent_still_alerts(paired):
+    """urgent 를 보내지 않는 예전 인형은 지금까지처럼 긴급으로 본다."""
+    result = data(
+        client.post(
+            f"/devices/{paired['device']}/safety-events",
+            json={"kind": "self_harm", "excerpt": "살기 싫어"},
+            headers=device_auth(),
+        )
+    )
+    assert result["alerted"] == 2
+
+    db = TestSession()
+    try:
+        assert db.scalars(select(SafetyEvent)).one().urgent is True
+    finally:
+        db.close()
+
+
+def test_unknown_source_is_rejected(paired):
+    response = client.post(
+        f"/devices/{paired['device']}/safety-events",
+        json={"kind": "self_harm", "excerpt": "x", "source": "gut"},
+        headers=device_auth(),
+    )
+    assert response.status_code == 422
+
+
 def test_unknown_kind_is_rejected(paired):
     response = client.post(
         f"/devices/{paired['device']}/safety-events",
