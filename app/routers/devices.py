@@ -429,19 +429,27 @@ def create_safety_event(
     학대 정황은 기록만 남긴다 — 사실
     확인이 안 된 이야기이고, 실시간 알림이 의심받는 사람에게 그대로 가면
     어르신이 오히려 위험해질 수 있다. 대신 리포트에 담겨 가족 모두가 본다.
+
+    알림은 두 단계다. 인형이 `urgent: false`(지켜볼 신호)로 보낸 자해 신호는
+    알리지 않고 기록만 한다 — LLM 혼자 위험으로 본 말은 오탐이 많아서, 잘못된
+    긴급 알림으로 가족을 놀라게 하지 않으려는 것이다. 그날 리포트에는 담긴다.
     """
     if device.id != device_id:
         raise APIError(403, "다른 기기의 토큰입니다.")
 
     event = SafetyEvent(
-        user_id=device.user_id, kind=body.kind, excerpt=body.excerpt
+        user_id=device.user_id,
+        kind=body.kind,
+        excerpt=body.excerpt,
+        urgent=body.urgent,
+        source=body.source,
     )
     db.add(event)
     db.commit()
     db.refresh(event)
 
     alerted = 0
-    if body.kind == "self_harm":
+    if body.kind == "self_harm" and body.urgent:
         alerted = notify_self_harm(db, device.user_id, body.excerpt or "")
 
     return envelope(

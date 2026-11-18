@@ -309,6 +309,7 @@ class ConversationStateRequest(CamelModel):
 
 # ── 안전 신호 ────────────────────────────────────────
 SAFETY_KINDS = {"self_harm", "harm_others", "medical", "abuse", "profanity"}
+SAFETY_SOURCES = {"rule", "llm", "llm+model", "model"}
 
 
 class SafetyEventRequest(CamelModel):
@@ -316,6 +317,17 @@ class SafetyEventRequest(CamelModel):
 
     kind: str = Field(min_length=1, max_length=20)
     excerpt: Optional[str] = Field(default=None, max_length=500)
+    # False 면 '지켜볼 신호' — 즉시 알리지 않고 그날 리포트에만 담는다.
+    # 예전 인형은 이 필드를 보내지 않으므로 기본은 긴급(지금까지와 같은 동작).
+    urgent: bool = True
+    source: Optional[str] = None
+
+    @field_validator("source")
+    @classmethod
+    def _check_source(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in SAFETY_SOURCES:
+            raise ValueError(f"source 는 {', '.join(sorted(SAFETY_SOURCES))} 중 하나여야 합니다.")
+        return v
 
     @field_validator("kind")
     @classmethod
